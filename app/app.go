@@ -88,6 +88,9 @@ import (
 	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
 	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
 	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
+	ibcwasm "github.com/cosmos/ibc-go/modules/light-clients/08-wasm"
+	ibcwasmkeeper "github.com/cosmos/ibc-go/modules/light-clients/08-wasm/keeper"
+	ibcwasmtypes "github.com/cosmos/ibc-go/modules/light-clients/08-wasm/types"
 	ica "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts"
 	icacontroller "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts/controller"
 	icacontrollerkeeper "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts/controller/keeper"
@@ -227,6 +230,7 @@ var (
 		stakedym.AppModuleBasic{},
 		wasm.AppModuleBasic{},
 		ibchooks.AppModuleBasic{},
+		ibcwasm.AppModuleBasic{},
 	)
 
 	// module account permissions
@@ -311,6 +315,7 @@ type StrideApp struct {
 	WasmKeeper            wasmkeeper.Keeper
 	ContractKeeper        *wasmkeeper.PermissionedKeeper
 	IBCHooksKeeper        ibchookskeeper.Keeper
+	IBCWasmClientKeeper   ibcwasmkeeper.Keeper
 
 	// Middleware for IBCHooks
 	Ics20WasmHooks   *ibchooks.WasmHooks
@@ -391,6 +396,7 @@ func NewStrideApp(
 		stakedymtypes.StoreKey,
 		wasmtypes.StoreKey,
 		ibchookstypes.StoreKey,
+		ibcwasmtypes.StoreKey,
 	)
 	tkeys := sdk.NewTransientStoreKeys(paramstypes.TStoreKey)
 	memKeys := sdk.NewMemoryStoreKeys(capabilitytypes.MemStoreKey)
@@ -572,6 +578,25 @@ func NewStrideApp(
 		wasmOpts...,
 	)
 	app.ContractKeeper = wasmkeeper.NewDefaultPermissionKeeper(app.WasmKeeper)
+
+	ibcWasmConfig :=
+		ibcwasmtypes.WasmConfig{
+			DataDir:               filepath.Join(homePath, "ibc_08-wasm"),
+			SupportedCapabilities: "iterator",
+			ContractDebugMode:     false,
+		}
+
+	// We are using a separate VM here
+	ibcWasmClientKeeper := ibcwasmkeeper.NewKeeperWithConfig(
+		appCodec,
+		keys[ibcwasmtypes.StoreKey],
+		app.IBCKeeper.ClientKeeper,
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		ibcWasmConfig,
+		bApp.GRPCQueryRouter(),
+	)
+
+	app.IBCWasmClientKeeper = ibcWasmClientKeeper
 
 	// Create evidence Keeper for to register the IBC light client misbehaviour evidence route
 	evidenceKeeper := evidencekeeper.NewKeeper(
@@ -873,6 +898,7 @@ func NewStrideApp(
 		packetforward.NewAppModule(app.PacketForwardKeeper, app.GetSubspace(packetforwardtypes.ModuleName)),
 		wasm.NewAppModule(appCodec, &app.WasmKeeper, app.StakingKeeper, app.AccountKeeper, app.BankKeeper, app.BaseApp.MsgServiceRouter(), app.GetSubspace(wasmtypes.ModuleName)),
 		ibchooks.NewAppModule(app.AccountKeeper),
+		ibcwasm.NewAppModule(app.IBCWasmClientKeeper),
 		transfer.NewAppModule(app.TransferKeeper),
 		// monitoringModule,
 		stakeibcModule,
@@ -929,6 +955,7 @@ func NewStrideApp(
 		staketiatypes.ModuleName,
 		stakedymtypes.ModuleName,
 		wasmtypes.ModuleName,
+		ibcwasmtypes.ModuleName,
 		ibchookstypes.ModuleName,
 	)
 
@@ -968,6 +995,7 @@ func NewStrideApp(
 		staketiatypes.ModuleName,
 		stakedymtypes.ModuleName,
 		wasmtypes.ModuleName,
+		ibcwasmtypes.ModuleName,
 		ibchookstypes.ModuleName,
 	)
 
@@ -1012,6 +1040,7 @@ func NewStrideApp(
 		staketiatypes.ModuleName,
 		stakedymtypes.ModuleName,
 		wasmtypes.ModuleName,
+		ibcwasmtypes.ModuleName,
 		ibchookstypes.ModuleName,
 	)
 
@@ -1084,6 +1113,13 @@ func NewStrideApp(
 		if err != nil {
 			panic(fmt.Errorf("failed to register snapshot extension: %s", err))
 		}
+
+		err = manager.RegisterExtensions(
+			ibcwasmkeeper.NewWasmSnapshotter(app.CommitMultiStore(), &app.IBCWasmClientKeeper),
+		)
+		if err != nil {
+			panic(fmt.Errorf("failed to register snapshot extension: %s", err))
+		}
 	}
 
 	if loadLatest {
@@ -1094,6 +1130,10 @@ func NewStrideApp(
 		// Initialize pinned codes in wasmvm as they are not persisted there
 		ctx := app.BaseApp.NewUncachedContext(true, tmproto.Header{})
 		if err := app.WasmKeeper.InitializePinnedCodes(ctx); err != nil {
+			tmos.Exit(fmt.Sprintf("failed initialize pinned codes %s", err))
+		}
+
+		if err := ibcwasmkeeper.InitializePinnedCodes(ctx, appCodec); err != nil {
 			tmos.Exit(fmt.Sprintf("failed initialize pinned codes %s", err))
 		}
 	}
